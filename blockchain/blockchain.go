@@ -6,11 +6,11 @@ import (
 	"sync"
 	"time"
 
-	"github.com/yourusername/blockchain-poa/block"
-	"github.com/yourusername/blockchain-poa/config"
-	"github.com/yourusername/blockchain-poa/state"
-	"github.com/yourusername/blockchain-poa/transaction"
-	"github.com/yourusername/blockchain-poa/validator"
+	"github.com/KevinKien/asynchronous-execution-simulation/block"
+	"github.com/KevinKien/asynchronous-execution-simulation/config"
+	"github.com/KevinKien/asynchronous-execution-simulation/state"
+	"github.com/KevinKien/asynchronous-execution-simulation/transaction"
+	"github.com/KevinKien/asynchronous-execution-simulation/validator"
 )
 
 // Blockchain represents the main blockchain data structure
