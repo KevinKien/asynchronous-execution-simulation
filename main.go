@@ -8,10 +8,10 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/yourusername/blockchain-poa/blockchain"
-	"github.com/yourusername/blockchain-poa/config"
-	"github.com/yourusername/blockchain-poa/transaction"
-	"github.com/yourusername/blockchain-poa/visualization"
+	"github.com/KevinKien/asynchronous-execution-simulation/blockchain"
+	"github.com/KevinKien/asynchronous-execution-simulation/config"
+	"github.com/KevinKien/asynchronous-execution-simulation/transaction"
+	"github.com/KevinKien/asynchronous-execution-simulation/visualization"
 )
 
 func main() {
