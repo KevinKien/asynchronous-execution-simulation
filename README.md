@@ -53,14 +53,14 @@ This Go project simulates a blockchain with Proof of Authority (PoA) consensus m
 
 2. Clone the repository:
    ```bash
-   git clone https://github.com/yourusername/blockchain-poa.git
-   cd blockchain-poa
+   git clone https://github.com/KevinKien/asynchronous-execution-simulation.git
+   cd asynchronous-execution-simulation
    ```
 
 3. Build and run the simulation:
    ```bash
    go build
-   ./blockchain-poa
+   ./asynchronous-execution-simulation
    ```
 
 ## Configuration Parameters
