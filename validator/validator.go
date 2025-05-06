@@ -8,7 +8,7 @@ import (
 	"crypto/sha256"
 	"fmt"
 
-	"github.com/yourusername/blockchain-poa/transaction"
+	"github.com/KevinKien/asynchronous-execution-simulation/transaction"
 )
 
 // Validator represents a node with validation privileges
