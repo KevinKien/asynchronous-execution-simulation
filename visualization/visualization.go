@@ -6,8 +6,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/yourusername/blockchain-poa/block"
-	"github.com/yourusername/blockchain-poa/blockchain"
+	"github.com/KevinKien/asynchronous-execution-simulation/block"
+	"github.com/KevinKien/asynchronous-execution-simulation/blockchain"
 )
 
 // BlockchainVisualizer provides visualization utilities for the blockchain
