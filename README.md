@@ -1,6 +1,6 @@
-# Blockchain Proof of Authority with Asynchronous Execution
+# Blockchain PoA with Asynchronous & Parallel Execution
 
-This Go project simulates a blockchain with Proof of Authority (PoA) consensus mechanism and asynchronous execution, following the process described in the design document. The simulation captures the entire workflow from transaction submission to state verification.
+This project is a blockchain simulation using Proof of Authority (PoA) consensus mechanism combined with asynchronous and parallel execution. This simulation fully demonstrates the process from when a user submits a transaction until the state is updated in the database, exactly as described in the design document.
 
 ## Project Structure
 
@@ -11,6 +11,10 @@ This Go project simulates a blockchain with Proof of Authority (PoA) consensus m
 │   └── blockchain.go      # Main blockchain engine
 ├── config/
 │   └── config.go          # Configuration parameters
+├── execution/
+│   └── parallel_execution.go # Quản lý thực thi song song
+├── performance/
+│   └── benchmarks.go      # Benchmark và phân tích hiệu suất
 ├── state/
 │   └── state.go           # State management
 ├── transaction/
@@ -22,30 +26,57 @@ This Go project simulates a blockchain with Proof of Authority (PoA) consensus m
 └── main.go                # Entry point for simulation
 ```
 
+## Operation Process
+
+1. **User Submits Transaction**
+- Transaction is signed with the user's private key
+- Transaction is sent to the network and enters the mempool
+
+2. **Transaction Propagation**
+- Transaction is propagated to validators
+- Validators perform preliminary checks (signature, format, balance)
+
+3. **Block Creation and Consensus Process**
+- Leader selects transactions from the mempool and creates a new block proposal
+- Block contains reference to previous block, transaction list, delayed merkle root
+- Other validators verify the block and vote without executing
+- Block is finalized when it receives sufficient votes
+
+4. **Parallel Execution**
+- Transactions are analyzed to identify dependencies
+- Transactions are executed in parallel across multiple threads
+- System tracks inputs/outputs and detects conflicts
+- Conflicting transactions are re-executed sequentially
+
+5. **State Update**
+- Execution results are merged into the common state
+- New merkle root is calculated and stored
+- Block becomes "Verified" when execution is complete
+
 ## Key Features
 
-1. **PoA Consensus**:
-   - Validators take turns becoming leaders in a round-robin fashion
-   - Leaders propose blocks containing transactions
-   - Validators vote on proposed blocks without executing transactions
-   - Blocks are finalized when they receive a quorum of votes
+1. **Proof of Authority (PoA) Consensus Mechanism**
+- Authorized validators take turns becoming the leader (proposer) according to a schedule
+- The leader selects and arranges transactions to include in the new block
+- Validators verify and vote for the block without executing transactions
+- A block is finalized when it receives sufficient votes (typically 2/3 of validators)
 
-2. **Asynchronous Execution**:
-   - Consensus and execution are decoupled processes
-   - Blocks are executed after finalization (or speculatively)
-   - State roots are calculated after execution
-   - State roots from D blocks ago are included in new blocks for verification
+2. **Asynchronous Execution**
+- Consensus and execution processes are separated
+- Blocks are executed after being finalized (or speculatively executed)
+- Merkle root from D previous blocks is included in the new block for verification
+- Allows consensus to continue while blocks are being executed
 
-3. **Transaction Flow**:
-   - Transactions are created, signed, and submitted to the mempool
-   - Transactions are propagated to validators
-   - Leaders select and order transactions into blocks
-   - Execution follows the order determined by consensus
+3. **Parallel Execution**
+- Executes multiple transactions simultaneously on different processing threads
+- Detects and resolves conflicts between transactions
+- Analyzes dependencies to optimize transaction ordering
+- Compares performance between sequential and parallel execution
 
-4. **Speculative Execution**:
-   - Optional feature to execute blocks before finalization
-   - Results are stored and used if the block gets finalized
-   - Improves throughput by parallelizing consensus and execution
+4. **Speculative Execution**
+- Executes blocks before they are finalized
+- Stores temporary results and applies them if the block is finalized
+- Increases performance by parallelizing consensus and execution
 
 ## How to Run
 
@@ -63,57 +94,66 @@ This Go project simulates a blockchain with Proof of Authority (PoA) consensus m
    ./asynchronous-execution-simulation
    ```
 
-## Configuration Parameters
-
-You can adjust the following parameters in the `config/config.go` file:
-
+## Configuration Customization
+Open the config/config.go file to adjust parameters:
 - `NumValidators`: Number of validators in the network
-- `NumTransactions`: Number of transactions to generate
-- `BlockSize`: Maximum number of transactions per block
-- `ExecutionDelay`: Number of blocks (D) between execution and verification
-- `BlockInterval`: Time between block proposals
-- `QuorumPercentage`: Required percentage of validators for consensus
-- `SpeculativeEnabled`: Whether to enable speculative execution
+- `NumTransactions`: Number of transactions to create
+- `BlockSize`: Maximum transactions in a block
+- `ExecutionDelay`: Block delay D between execution and verification
+- `ParallelExecutionEnabled`: Enable/disable parallel execution
+- `ParallelWorkers`: Number of parallel threads
+- `OptimizeTransactionOrder`: Enable/disable transaction order optimization
 
-## Simulation Output
+## Performance Measurement
+The project includes benchmarking tools to compare performance between sequential and parallel execution:
+- `Execution Time`: Compares total time and average time per transaction
+- `Conflict Detection`: Number and percentage of conflicts between transactions
+- `Speedup Ratio`: Performance improvement level of parallel execution
 
-The simulation outputs several visualizations:
+Results are displayed after each block and in a final summary report.
 
-1. **Blockchain State**: Current height, account balances, and block status
-2. **Blockchain Timeline**: Timestamps for each block's state transitions
-3. **Transaction Flow**: Distribution of transactions across blocks
-4. **Validator Statistics**: Block proposals and voting activity
-5. **Execution Statistics**: Delays and lags between consensus and execution
+## Sample Transactions for Testing
+The simulation generates various transaction patterns to test parallel execution performance:
+- `Independent Transactions`: Transactions between unrelated accounts
+- `Sequential Transactions`: Multiple transactions from the same sender
+- `Circular Transactions`: Chain of transactions forming a circle (A->B->C->A)
+- `Many-to-One Transactions`: Multiple senders, one receiver
+- `One-to-Many Transactions`: One sender, multiple receivers
 
-## Implementation Details
+## Results and Analysis
+After running the simulation, you will receive:
+- `Blockchain State`: Current state, account balances, and block status
+- `Blockchain Timeline`: Timeline for each block
+- `Transaction Flow`: Distribution of transactions across blocks
+- `Validator Statistics`: Statistics on validator activities
+- `Execution Statistics`: Execution time and delay statistics
+- `Performance Comparison`: Sequential vs parallel performance comparison
 
-### Block Lifecycle
-
+## Block Lifecycle
 Each block goes through the following states:
+- `Proposed`: Block is created and proposed by the leader
+- `Voted`: Block receives sufficient votes from validators
+- `Finalized`: Block cannot be reversed (occurs when the next block is voted)
+- `Verified`: Execution is complete and state is updated
 
-1. **Proposed**: Block is created and proposed by the current leader
-2. **Voted**: Block received enough votes from validators (quorum)
-3. **Finalized**: Block cannot be reverted (happens when next block is voted)
-4. **Verified**: Execution is complete and state is updated
+## Synchronization and Error Handling
 
-### Asynchronous Execution Process
+- If a node detects its merkle root doesn't match the consensus merkle root after D blocks, it will rollback to the last verified state and re-execute
+- In case of conflicting transactions during parallel execution, the system will re-execute affected transactions sequentially
 
-1. When a block is finalized, it enters the execution queue
-2. Transactions in the block are executed against the state
-3. A new state root is calculated and stored
-4. The block is verified once execution is complete
-5. Future blocks include the delayed state root for verification
+## Compatibility with Design Document
+This simulation is built to fully demonstrate the process described in the design document, including:
+- PoA consensus mechanism
+- Asynchronous execution with D blocks delay
+- Delayed merkle root for state verification
+- Parallel execution with conflict detection
 
 ## Notes
-
-This is a simplified simulation designed for educational purposes. In a production environment, you would need to implement:
+This is a simplified simulation to illustrate concepts. In a real production environment, you would need:
 
 - Network communication between nodes
-- Persistence for blockchain and state
-- More sophisticated mempool management
+- Blockchain and state persistence
+- Improved mempool management
 - Advanced error handling and recovery mechanisms
-- Cryptographic operations with proper security measures
+- Enhanced cryptographic security measures
 
-## License
-
-MIT License
