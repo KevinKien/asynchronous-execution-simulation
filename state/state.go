@@ -7,8 +7,6 @@ import (
 	"fmt"
 	"sort"
 	"sync"
-
-	"github.com/KevinKien/asynchronous-execution-simulation/transaction"
 )
 
 // Account represents a user account in the state
@@ -83,42 +81,81 @@ func (s *State) GetAccount(address string) (*Account, bool) {
 }
 
 // ExecuteTransaction executes a single transaction against the state
-func (s *State) ExecuteTransaction(tx *transaction.Transaction) error {
+func (s *State) ExecuteTransaction(tx interface{}) error {
 	s.StateMutex.Lock()
 	defer s.StateMutex.Unlock()
 	
+	// Extract transaction fields using type assertion
+	var sender, recipient string
+	var amount, nonce int
+	var id string
+	
+	switch t := tx.(type) {
+	case struct {
+		ID        string
+		Sender    string
+		Recipient string
+		Amount    int
+		Nonce     int
+	}:
+		sender = t.Sender
+		recipient = t.Recipient
+		amount = t.Amount
+		nonce = t.Nonce
+		id = t.ID
+	case map[string]interface{}:
+		var ok bool
+		if sender, ok = t["Sender"].(string); !ok {
+			return fmt.Errorf("invalid sender type")
+		}
+		if recipient, ok = t["Recipient"].(string); !ok {
+			return fmt.Errorf("invalid recipient type")
+		}
+		if amount, ok = t["Amount"].(int); !ok {
+			return fmt.Errorf("invalid amount type")
+		}
+		if nonce, ok = t["Nonce"].(int); !ok {
+			return fmt.Errorf("invalid nonce type")
+		}
+		if id, ok = t["ID"].(string); !ok {
+			id = fmt.Sprintf("tx_%s_%d", sender, nonce)
+		}
+	default:
+		return fmt.Errorf("unsupported transaction type")
+	}
+	
 	// Get sender account
-	sender, exists := s.Accounts[tx.Sender]
+	senderAcc, exists := s.Accounts[sender]
 	if !exists {
-		return fmt.Errorf("sender account %s not found", tx.Sender)
+		return fmt.Errorf("sender account %s not found", sender)
 	}
 	
 	// Verify nonce
-	if tx.Nonce != sender.Nonce {
+	if nonce != senderAcc.Nonce {
 		return fmt.Errorf("invalid nonce for tx %s: expected %d, got %d", 
-			tx.ID, sender.Nonce, tx.Nonce)
+			id, senderAcc.Nonce, nonce)
 	}
 	
 	// Verify balance
-	if sender.Balance < tx.Amount {
-		return fmt.Errorf("insufficient balance for tx %s", tx.ID)
+	if senderAcc.Balance < amount {
+		return fmt.Errorf("insufficient balance for tx %s", id)
 	}
 	
 	// Get or create recipient account
-	recipient, exists := s.Accounts[tx.Recipient]
+	recipientAcc, exists := s.Accounts[recipient]
 	if !exists {
-		recipient = &Account{
-			Address: tx.Recipient,
+		recipientAcc = &Account{
+			Address: recipient,
 			Balance: 0,
 			Nonce:   0,
 		}
-		s.Accounts[tx.Recipient] = recipient
+		s.Accounts[recipient] = recipientAcc
 	}
 	
 	// Execute the transaction
-	sender.Balance -= tx.Amount
-	recipient.Balance += tx.Amount
-	sender.Nonce++
+	senderAcc.Balance -= amount
+	recipientAcc.Balance += amount
+	senderAcc.Nonce++
 	
 	// Update state root
 	s.CalculateStateRoot()
