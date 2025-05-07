@@ -5,10 +5,10 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/KevinKien/asynchronous-execution-simulation/block"
-	"github.com/KevinKien/asynchronous-execution-simulation/execution"
-	"github.com/KevinKien/asynchronous-execution-simulation/state"
-	"github.com/KevinKien/asynchronous-execution-simulation/transaction"
+	"asynchronous-execution-simulation/block"
+	"asynchronous-execution-simulation/execution"
+	"asynchronous-execution-simulation/state"
+	"asynchronous-execution-simulation/transaction"
 )
 
 // ExecutionStats contains statistics about execution performance
@@ -20,6 +20,7 @@ type ExecutionStats struct {
 	Failed           int
 	Conflicts        int
 	ReexecutionCount int
+	TxTimes          []time.Duration // Individual transaction times
 }
 
 // BenchmarkResults contains benchmark comparison results
@@ -31,19 +32,37 @@ type BenchmarkResults struct {
 
 // BenchmarkExecutor benchmarks different execution strategies
 type BenchmarkExecutor struct {
-	State         *state.State
-	Transactions  []*transaction.Transaction
-	NumWorkers    int
+	State                *state.State
+	Transactions         []*transaction.Transaction
+	NumWorkers           int
 	EnabledOptimizations bool
+	SimulateCompute      bool
+	ComputeComplexity    int
 }
 
 // NewBenchmarkExecutor creates a new benchmark executor
 func NewBenchmarkExecutor(s *state.State, txs []*transaction.Transaction, workers int, enableOptimizations bool) *BenchmarkExecutor {
 	return &BenchmarkExecutor{
-		State:         s,
-		Transactions:  txs,
-		NumWorkers:    workers,
+		State:                s,
+		Transactions:         txs,
+		NumWorkers:           workers,
 		EnabledOptimizations: enableOptimizations,
+		SimulateCompute:      false, // Default
+		ComputeComplexity:    1,     // Default
+	}
+}
+
+// SetComputeSimulation configures simulation of compute-intensive transactions
+func (be *BenchmarkExecutor) SetComputeSimulation(enabled bool, complexity int) {
+	be.SimulateCompute = enabled
+	be.ComputeComplexity = complexity
+}
+
+// simulateComputation simulates compute-intensive work
+func simulateComputation(complexity int) {
+	// Simulate computation by performing a CPU-bound task
+	for i := 0; i < complexity*1000000; i++ {
+		_ = i * i // Just waste some CPU cycles
 	}
 }
 
@@ -55,13 +74,25 @@ func (be *BenchmarkExecutor) RunSequential() ExecutionStats {
 	stateCopy := be.State.Copy()
 	stats := ExecutionStats{
 		NumTransactions: len(be.Transactions),
+		TxTimes:         make([]time.Duration, len(be.Transactions)),
 	}
 	
 	startTime := time.Now()
 	
 	// Execute each transaction sequentially
-	for _, tx := range be.Transactions {
+	for i, tx := range be.Transactions {
+		txStartTime := time.Now()
+		
+		// Simulate compute-intensive work if enabled
+		if be.SimulateCompute {
+			simulateComputation(be.ComputeComplexity)
+		}
+		
 		err := stateCopy.ExecuteTransaction(tx)
+		
+		// Record transaction time
+		stats.TxTimes[i] = time.Since(txStartTime)
+		
 		if err != nil {
 			stats.Failed++
 		} else {
@@ -85,12 +116,18 @@ func (be *BenchmarkExecutor) RunParallel() ExecutionStats {
 	stateCopy := be.State.Copy()
 	stats := ExecutionStats{
 		NumTransactions: len(be.Transactions),
+		TxTimes:         make([]time.Duration, len(be.Transactions)),
 	}
 	
 	startTime := time.Now()
 	
 	// Create parallel executor
 	executor := execution.NewParallelExecutor(be.NumWorkers, stateCopy)
+	
+	// Configure compute simulation
+	if be.SimulateCompute {
+		executor.SetComplexity(execution.TransactionComplexity(be.ComputeComplexity), true)
+	}
 	
 	// Optimize transaction order if enabled
 	var txsToExecute []*transaction.Transaction
@@ -105,7 +142,7 @@ func (be *BenchmarkExecutor) RunParallel() ExecutionStats {
 	results, _ := executor.ExecuteBatch(txsToExecute)
 	
 	// Gather stats
-	for _, result := range results {
+	for i, result := range results {
 		if result.Success {
 			stats.Success++
 		} else {
@@ -116,6 +153,11 @@ func (be *BenchmarkExecutor) RunParallel() ExecutionStats {
 		if result.Conflict {
 			stats.Conflicts++
 			stats.ReexecutionCount++
+		}
+		
+		// Record execution time if available
+		if i < len(stats.TxTimes) {
+			stats.TxTimes[i] = result.Duration
 		}
 	}
 	
@@ -129,12 +171,14 @@ func (be *BenchmarkExecutor) RunParallel() ExecutionStats {
 
 // CompareBenchmarks runs both sequential and parallel benchmarks and compares them
 func (be *BenchmarkExecutor) CompareBenchmarks() BenchmarkResults {
+	// Run sequential benchmark
 	sequentialStats := be.RunSequential()
 	fmt.Println("Sequential execution complete")
 	
 	// Reset state between tests
 	time.Sleep(100 * time.Millisecond)
 	
+	// Run parallel benchmark
 	parallelStats := be.RunParallel()
 	fmt.Println("Parallel execution complete")
 	
@@ -149,6 +193,40 @@ func (be *BenchmarkExecutor) CompareBenchmarks() BenchmarkResults {
 		ParallelStats:   parallelStats,
 		Speedup:         speedup,
 	}
+}
+
+// analyzeTxTimes calculates min, max, and median transaction times
+func analyzeTxTimes(times []time.Duration) (min, max, median time.Duration) {
+	if len(times) == 0 {
+		return 0, 0, 0
+	}
+	
+	// Make a copy to avoid modifying the original
+	timesCopy := make([]time.Duration, len(times))
+	copy(timesCopy, times)
+	
+	// Sort the times
+	for i := 0; i < len(timesCopy)-1; i++ {
+		for j := 0; j < len(timesCopy)-i-1; j++ {
+			if timesCopy[j] > timesCopy[j+1] {
+				timesCopy[j], timesCopy[j+1] = timesCopy[j+1], timesCopy[j]
+			}
+		}
+	}
+	
+	// Find min, max, median
+	min = timesCopy[0]
+	max = timesCopy[len(timesCopy)-1]
+	
+	// Calculate median
+	middle := len(timesCopy) / 2
+	if len(timesCopy)%2 == 0 {
+		median = (timesCopy[middle-1] + timesCopy[middle]) / 2
+	} else {
+		median = timesCopy[middle]
+	}
+	
+	return min, max, median
 }
 
 // PrintResults prints benchmark results in a formatted table
@@ -170,24 +248,49 @@ func PrintResults(results BenchmarkResults) {
 	
 	// Analysis of results
 	fmt.Println("\nAnalysis:")
-	if results.Speedup > 1.1 {
+	if results.Speedup > 1.5 {
 		fmt.Printf("- Parallel execution was %.2fx faster than sequential execution\n", results.Speedup)
-	} else if results.Speedup < 0.9 {
-		fmt.Printf("- Parallel execution was slower than sequential execution (%.2fx)\n", results.Speedup)
-		fmt.Println("  This might be due to high conflict rate or overhead of parallelization")
-	} else {
-		fmt.Println("- Parallel execution performance was similar to sequential execution")
-	}
-	
-	if results.ParallelStats.Conflicts > 0 {
-		conflictRate := float64(results.ParallelStats.Conflicts) / float64(results.ParallelStats.NumTransactions) * 100
-		fmt.Printf("- Conflict rate: %.1f%% of transactions had conflicts\n", conflictRate)
 		
-		if conflictRate > 30 {
-			fmt.Println("  High conflict rate suggests many interdependent transactions")
+		if results.ParallelStats.Conflicts > 0 {
+			conflictRate := float64(results.ParallelStats.Conflicts) / float64(results.ParallelStats.NumTransactions) * 100
+			fmt.Printf("  Even with a %.1f%% conflict rate, parallelism provided significant benefits\n", conflictRate)
+		} else {
+			fmt.Println("  With no conflicts detected, transactions were fully parallelizable")
+		}
+		
+		if results.SequentialStats.AvgTimePerTx > 1*time.Millisecond {
+			fmt.Println("  Transactions were compute-intensive enough to benefit from parallelism")
+		}
+	} else if results.Speedup > 1.0 {
+		fmt.Printf("- Parallel execution was slightly faster (%.2fx) than sequential execution\n", results.Speedup)
+		
+		if results.ParallelStats.Conflicts > 0 {
+			conflictRate := float64(results.ParallelStats.Conflicts) / float64(results.ParallelStats.NumTransactions) * 100
+			fmt.Printf("  A %.1f%% conflict rate limited potential speedup\n", conflictRate)
 		}
 	} else {
-		fmt.Println("- No conflicts detected, transactions were fully parallelizable")
+		fmt.Printf("- Parallel execution was slower than sequential execution (%.2fx)\n", results.Speedup)
+		
+		if results.ParallelStats.Conflicts > 0 {
+			conflictRate := float64(results.ParallelStats.Conflicts) / float64(results.ParallelStats.NumTransactions) * 100
+			fmt.Printf("  High conflict rate (%.1f%%) significantly reduced parallel performance\n", conflictRate)
+		}
+		
+		if results.SequentialStats.AvgTimePerTx < 10*time.Microsecond {
+			fmt.Println("  Transactions were too simple to benefit from parallelism")
+			fmt.Println("  Overhead of parallelization exceeded execution time savings")
+		}
+	}
+	
+	// Transaction time distribution analysis
+	if len(results.SequentialStats.TxTimes) > 0 {
+		// Calculate min/max/median times
+		seqMin, seqMax, seqMedian := analyzeTxTimes(results.SequentialStats.TxTimes)
+		parMin, parMax, parMedian := analyzeTxTimes(results.ParallelStats.TxTimes)
+		
+		fmt.Println("\nTransaction Time Distribution:")
+		fmt.Printf("- Sequential: min=%v, median=%v, max=%v\n", seqMin, seqMedian, seqMax)
+		fmt.Printf("- Parallel:   min=%v, median=%v, max=%v\n", parMin, parMedian, parMax)
 	}
 }
 
@@ -197,6 +300,14 @@ func RunBlockBenchmark(b *block.Block, s *state.State, numWorkers int) Benchmark
 		b.Height, len(b.Transactions))
 	
 	benchmarker := NewBenchmarkExecutor(s, b.Transactions, numWorkers, true)
+	
+	// Detect if transactions might be compute-intensive
+	// In a real system, we'd have better heuristics
+	if len(b.Transactions) > 30 {
+		// Simulate medium complexity for larger blocks
+		benchmarker.SetComputeSimulation(true, 5)
+	}
+	
 	results := benchmarker.CompareBenchmarks()
 	
 	PrintResults(results)
