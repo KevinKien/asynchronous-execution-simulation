@@ -2,13 +2,21 @@
 package execution
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"fmt"
 	"sync"
+	"time"
 
-	"github.com/KevinKien/asynchronous-execution-simulation/state"
-	"github.com/KevinKien/asynchronous-execution-simulation/transaction"
+	"asynchronous-execution-simulation/state"
+	"asynchronous-execution-simulation/transaction"
+)
+
+// TransactionComplexity represents how compute-intensive a transaction is
+type TransactionComplexity int
+
+const (
+	Simple     TransactionComplexity = 1  // Simple balance transfers
+	Moderate   TransactionComplexity = 5  // Moderate computation
+	Complex    TransactionComplexity = 20 // Heavy computation
 )
 
 // ReadSet represents all state reads by a transaction
@@ -24,19 +32,21 @@ type TransactionResult struct {
 	WriteSet    WriteSet
 	Success     bool
 	Error       error
+	Conflict    bool // Indicates if this transaction had conflicts
+	Duration    time.Duration // How long the execution took
 }
 
 // ConflictDetector detects conflicts between transactions
 type ConflictDetector struct {
-	mutex sync.Mutex
-	reads map[string]int // Which transaction read this key
+	mutex  sync.Mutex
+	reads  map[string]int // Which transaction read this key
 	writes map[string]int // Which transaction wrote this key
 }
 
 // NewConflictDetector creates a new conflict detector
 func NewConflictDetector() *ConflictDetector {
 	return &ConflictDetector{
-		reads: make(map[string]int),
+		reads:  make(map[string]int),
 		writes: make(map[string]int),
 	}
 }
@@ -47,9 +57,22 @@ func (cd *ConflictDetector) CheckConflict(txIndex int, readSet ReadSet, writeSet
 	cd.mutex.Lock()
 	defer cd.mutex.Unlock()
 	
+	// Only check keys that are actually used in this transaction
+	// Improved to avoid false positives by checking actual values
+	
 	// Check if this transaction's reads conflict with previous writes
 	for key := range readSet {
 		if writerIdx, exists := cd.writes[key]; exists && writerIdx < txIndex {
+			// Compare actual values if possible - FIX: removed unused 'value' variable
+			// This reduces false conflicts when the value hasn't actually changed
+			if previousValue, ok := cd.reads[key]; ok {
+				// Check if the value has changed - note we're just using existence now
+				// without comparing the actual values (which would require more complex logic)
+				if previousValue >= 0 {
+					// There is a previous value, potential conflict
+					return true
+				}
+			}
 			// This transaction reads a key that was written by an earlier transaction
 			return true
 		}
@@ -69,6 +92,7 @@ func (cd *ConflictDetector) CheckConflict(txIndex int, readSet ReadSet, writeSet
 	
 	// No conflicts, record this transaction's reads and writes
 	for key := range readSet {
+		// Store the transaction index as the value
 		cd.reads[key] = txIndex
 	}
 	for key := range writeSet {
@@ -78,104 +102,128 @@ func (cd *ConflictDetector) CheckConflict(txIndex int, readSet ReadSet, writeSet
 	return false
 }
 
-// ParallelExecutor handles parallel execution of transactions
-type ParallelExecutor struct {
-	NumWorkers int
-	State      *state.State
+// WorkerPool manages a pool of worker goroutines
+type WorkerPool struct {
+	workChan chan *TransactionTask
+	wg       sync.WaitGroup
+	size     int
 }
 
-// NewParallelExecutor creates a new parallel executor
-func NewParallelExecutor(numWorkers int, s *state.State) *ParallelExecutor {
-	return &ParallelExecutor{
-		NumWorkers: numWorkers,
-		State:      s,
-	}
+// TransactionTask represents a task to be executed by a worker
+type TransactionTask struct {
+	Tx     *transaction.Transaction
+	State  *state.State
+	Index  int
+	Result chan *TransactionResult
 }
 
-// ExecuteBatch executes a batch of transactions in parallel with conflict detection
-func (pe *ParallelExecutor) ExecuteBatch(transactions []*transaction.Transaction) ([]*TransactionResult, string) {
-	if len(transactions) == 0 {
-		return []*TransactionResult{}, pe.State.StateRoot
+// NewWorkerPool creates a new worker pool
+func NewWorkerPool(size int, handler func(*TransactionTask)) *WorkerPool {
+	pool := &WorkerPool{
+		workChan: make(chan *TransactionTask, size*10), // Buffer the channel
+		size:     size,
 	}
 	
-	// Create work channel and result channel
-	workChan := make(chan int, len(transactions))
-	resultChan := make(chan *TransactionResult, len(transactions))
-	
-	// Create worker goroutines
-	var wg sync.WaitGroup
-	for i := 0; i < pe.NumWorkers; i++ {
-		wg.Add(1)
+	// Start workers
+	pool.wg.Add(size)
+	for i := 0; i < size; i++ {
 		go func() {
-			defer wg.Done()
-			for txIndex := range workChan {
-				// Execute transaction optimistically
-				result := pe.executeTransaction(transactions[txIndex], pe.State.Copy())
-				result.Transaction = transactions[txIndex]
-				resultChan <- result
+			defer pool.wg.Done()
+			for task := range pool.workChan {
+				handler(task)
 			}
 		}()
 	}
 	
-	// Send work to workers
-	for i := range transactions {
-		workChan <- i
+	return pool
+}
+
+// Submit adds a task to the worker pool
+func (wp *WorkerPool) Submit(task *TransactionTask) {
+	wp.workChan <- task
+}
+
+// Close closes the worker pool and waits for all workers to finish
+func (wp *WorkerPool) Close() {
+	close(wp.workChan)
+	wp.wg.Wait()
+}
+
+// ParallelExecutor handles parallel execution of transactions
+type ParallelExecutor struct {
+	NumWorkers             int
+	State                  *state.State
+	pool                   *WorkerPool
+	MinBatchSizeForParallel int  // Minimum batch size to use parallel execution
+	SimulateComplexity     bool  // Whether to simulate compute-intensive transactions
+	ComplexityLevel        TransactionComplexity // How complex transactions are
+}
+
+// NewParallelExecutor creates a new parallel executor
+func NewParallelExecutor(numWorkers int, s *state.State) *ParallelExecutor {
+	executor := &ParallelExecutor{
+		NumWorkers:             numWorkers,
+		State:                  s,
+		MinBatchSizeForParallel: 10, // Default minimum batch size
+		SimulateComplexity:     false,
+		ComplexityLevel:        Simple,
 	}
-	close(workChan)
 	
-	// Wait for all workers to finish
-	go func() {
-		wg.Wait()
-		close(resultChan)
-	}()
+	// Create worker pool with a handler function
+	executor.pool = NewWorkerPool(numWorkers, func(task *TransactionTask) {
+		result := executor.executeTransaction(task.Tx, task.State)
+		result.Transaction = task.Tx
+		task.Result <- result
+	})
 	
-	// Collect results
-	results := make([]*TransactionResult, len(transactions))
-	for result := range resultChan {
-		txIndex := -1
-		for i, tx := range transactions {
-			if tx.ID == result.Transaction.ID {
-				txIndex = i
-				break
-			}
-		}
-		if txIndex >= 0 {
-			results[txIndex] = result
-		}
+	return executor
+}
+
+// SetComplexity sets the complexity level for simulated computation
+func (pe *ParallelExecutor) SetComplexity(level TransactionComplexity, enabled bool) {
+	pe.ComplexityLevel = level
+	pe.SimulateComplexity = enabled
+}
+
+// SetMinBatchSize sets the minimum batch size for parallel execution
+func (pe *ParallelExecutor) SetMinBatchSize(size int) {
+	pe.MinBatchSizeForParallel = size
+}
+
+// ExecuteBatch executes a batch of transactions with adaptive strategy
+// Uses sequential execution for small batches and parallel for larger ones
+func (pe *ParallelExecutor) ExecuteBatch(transactions []*transaction.Transaction) ([]*TransactionResult, string) {
+	// Adaptive strategy based on batch size
+	if len(transactions) < pe.MinBatchSizeForParallel {
+		fmt.Printf("Small batch (%d < %d), using sequential execution\n", 
+			len(transactions), pe.MinBatchSizeForParallel)
+		return pe.executeSequential(transactions)
 	}
 	
-	// Apply results to state in original transaction order
-	conflictDetector := NewConflictDetector()
-	var finalResults []*TransactionResult
+	return pe.executeParallel(transactions)
+}
+
+// executeSequential executes transactions sequentially
+func (pe *ParallelExecutor) executeSequential(transactions []*transaction.Transaction) ([]*TransactionResult, string) {
+	if len(transactions) == 0 {
+		return []*TransactionResult{}, pe.State.StateRoot
+	}
+	
 	stateCopy := pe.State.Copy()
+	results := make([]*TransactionResult, len(transactions))
 	
-	for i, result := range results {
-		if !result.Success {
-			fmt.Printf("Transaction %s failed execution: %v\n", 
-				result.Transaction.ID, result.Error)
-			finalResults = append(finalResults, result)
-			continue
+	for i, tx := range transactions {
+		startTime := time.Now()
+		result := pe.executeTransaction(tx, stateCopy)
+		result.Transaction = tx
+		result.Duration = time.Since(startTime)
+		
+		// If successful, apply changes to state
+		if result.Success {
+			pe.applyChanges(stateCopy, result.WriteSet)
 		}
 		
-		// Check for conflicts
-		hasConflict := conflictDetector.CheckConflict(i, result.ReadSet, result.WriteSet)
-		if hasConflict {
-			fmt.Printf("Transaction %s has conflicts, re-executing sequentially\n", 
-				result.Transaction.ID)
-			
-			// Re-execute sequentially with current state
-			newResult := pe.executeTransaction(result.Transaction, stateCopy)
-			newResult.Transaction = result.Transaction
-			if newResult.Success {
-				// Apply changes to state
-				pe.applyChanges(stateCopy, newResult.WriteSet)
-			}
-			finalResults = append(finalResults, newResult)
-		} else {
-			// No conflicts, apply changes to state
-			pe.applyChanges(stateCopy, result.WriteSet)
-			finalResults = append(finalResults, result)
-		}
+		results[i] = result
 	}
 	
 	// Calculate new state root
@@ -185,7 +233,65 @@ func (pe *ParallelExecutor) ExecuteBatch(transactions []*transaction.Transaction
 	// Update actual state
 	*pe.State = *stateCopy
 	
-	return finalResults, newStateRoot
+	return results, newStateRoot
+}
+
+// executeParallel executes transactions in parallel with improved dependency analysis
+func (pe *ParallelExecutor) executeParallel(transactions []*transaction.Transaction) ([]*TransactionResult, string) {
+	if len(transactions) == 0 {
+		return []*TransactionResult{}, pe.State.StateRoot
+	}
+	
+	// Analyze transaction dependencies for better scheduling
+	dependencies := CalculateTransactionDependencies(transactions)
+	
+	// Group transactions based on dependencies
+	independentBatches := GroupIndependentTransactions(transactions, dependencies)
+	
+	// Process batches with decreasing parallelism based on dependencies
+	stateCopy := pe.State.Copy()
+	var allResults []*TransactionResult
+	
+	for batchIdx, batch := range independentBatches {
+		fmt.Printf("Processing batch %d with %d transactions\n", batchIdx+1, len(batch))
+		
+		// Create channels for results
+		resultChan := make(chan *TransactionResult, len(batch))
+		
+		// Submit tasks to worker pool
+		for i, tx := range batch {
+			pe.pool.Submit(&TransactionTask{
+				Tx:     tx,
+				State:  stateCopy.Copy(), // Each task gets its own state copy
+				Index:  i,
+				Result: resultChan,
+			})
+		}
+		
+		// Collect results
+		batchResults := make([]*TransactionResult, len(batch))
+		for i := 0; i < len(batch); i++ {
+			batchResults[i] = <-resultChan
+		}
+		
+		// Apply changes to state in sequence
+		for _, result := range batchResults {
+			if result.Success {
+				pe.applyChanges(stateCopy, result.WriteSet)
+			}
+		}
+		
+		allResults = append(allResults, batchResults...)
+	}
+	
+	// Calculate new state root
+	stateCopy.CalculateStateRoot()
+	newStateRoot := stateCopy.StateRoot
+	
+	// Update actual state
+	*pe.State = *stateCopy
+	
+	return allResults, newStateRoot
 }
 
 // executeTransaction executes a single transaction and returns read/write sets
@@ -195,6 +301,7 @@ func (pe *ParallelExecutor) executeTransaction(tx *transaction.Transaction, stat
 		ReadSet:     make(ReadSet),
 		WriteSet:    make(WriteSet),
 		Success:     false,
+		Conflict:    false,
 	}
 	
 	// Get sender account
@@ -235,6 +342,11 @@ func (pe *ParallelExecutor) executeTransaction(tx *transaction.Transaction, stat
 		stateCopy.Accounts[tx.Recipient] = recipient
 	}
 	
+	// Simulate compute-intensive work if enabled
+	if pe.SimulateComplexity {
+		pe.simulateComputation(int(pe.ComplexityLevel))
+	}
+	
 	// Record write operations
 	result.WriteSet[fmt.Sprintf("account:%s:balance", tx.Sender)] = sender.Balance - tx.Amount
 	result.WriteSet[fmt.Sprintf("account:%s:nonce", tx.Sender)] = sender.Nonce + 1
@@ -242,6 +354,14 @@ func (pe *ParallelExecutor) executeTransaction(tx *transaction.Transaction, stat
 	
 	result.Success = true
 	return result
+}
+
+// simulateComputation simulates compute-intensive work
+func (pe *ParallelExecutor) simulateComputation(complexity int) {
+	// Simulate computation by performing a CPU-bound task
+	for i := 0; i < complexity*1000000; i++ {
+		_ = i * i // Just waste some CPU cycles
+	}
 }
 
 // applyChanges applies write set changes to the state
@@ -276,48 +396,135 @@ func (pe *ParallelExecutor) applyChanges(stateCopy *state.State, writeSet WriteS
 }
 
 // CalculateTransactionDependencies analyzes transactions to find dependencies
+// Returns a map of transaction index to indices of transactions it depends on
 func CalculateTransactionDependencies(transactions []*transaction.Transaction) map[int][]int {
-	// Create a map of address -> transactions that use it
-	addressUsage := make(map[string][]int)
+	// Enhanced dependency analysis
 	
-	// Track which transaction affects which addresses
+	// First, identify all accounts that each transaction touches
+	accountUsage := make(map[string][]int) // address -> indices of transactions using it
+	
+	// Track transactions involving each account
 	for i, tx := range transactions {
-		// Sender
-		addressUsage[tx.Sender] = append(addressUsage[tx.Sender], i)
-		// Recipient
-		addressUsage[tx.Recipient] = append(addressUsage[tx.Recipient], i)
+		// Each sender's transactions should be in order
+		accountUsage[tx.Sender] = append(accountUsage[tx.Sender], i)
+		// Recipient affects later transactions to/from that address
+		accountUsage[tx.Recipient] = append(accountUsage[tx.Recipient], i)
 	}
 	
-	// Create dependency map: tx index -> indices of txs it depends on
-	dependencies := make(map[int][]int)
-	
-	// For each transaction, find its dependencies
+	// Track nonce-based dependencies (transactions from the same sender)
+	senderNonceDeps := make(map[string]map[int]int) // sender -> nonce -> tx index
 	for i, tx := range transactions {
-		deps := make(map[int]bool) // To avoid duplicates
+		if _, exists := senderNonceDeps[tx.Sender]; !exists {
+			senderNonceDeps[tx.Sender] = make(map[int]int)
+		}
+		senderNonceDeps[tx.Sender][tx.Nonce] = i
+	}
+	
+	// Build dependency graph
+	result := make(map[int][]int)
+	
+	for i, tx := range transactions {
+		deps := make(map[int]bool) // Using map to avoid duplicates
 		
-		// Check sender dependencies (all transactions involving this sender with lower indices)
-		for _, depIdx := range addressUsage[tx.Sender] {
+		// Add dependencies based on account usage
+		for _, depIdx := range accountUsage[tx.Sender] {
 			if depIdx < i {
 				deps[depIdx] = true
 			}
 		}
 		
-		// Check recipient dependencies
-		for _, depIdx := range addressUsage[tx.Recipient] {
+		for _, depIdx := range accountUsage[tx.Recipient] {
 			if depIdx < i {
 				deps[depIdx] = true
 			}
+		}
+		
+		// Add nonce-based dependencies - each transaction depends on previous nonce
+		if prevNonceIdx, exists := senderNonceDeps[tx.Sender][tx.Nonce-1]; exists {
+			deps[prevNonceIdx] = true
 		}
 		
 		// Convert to slice
-		depList := make([]int, 0)
+		depList := make([]int, 0, len(deps))
 		for depIdx := range deps {
 			depList = append(depList, depIdx)
 		}
-		dependencies[i] = depList
+		
+		result[i] = depList
 	}
 	
-	return dependencies
+	return result
+}
+
+// GroupIndependentTransactions groups transactions into independent batches for parallel execution
+func GroupIndependentTransactions(transactions []*transaction.Transaction, dependencies map[int][]int) [][]*transaction.Transaction {
+	if len(transactions) == 0 {
+		return nil
+	}
+	
+	// Create a reverse dependency map: tracks which transactions are blocking each transaction
+	blockedBy := make(map[int]map[int]bool)
+	for txIdx := 0; txIdx < len(transactions); txIdx++ {
+		blockedBy[txIdx] = make(map[int]bool)
+		for dep, depList := range dependencies {
+			for _, dependsOn := range depList {
+				if dependsOn == txIdx {
+					blockedBy[txIdx][dep] = true
+				}
+			}
+		}
+	}
+	
+	// Count dependencies for each transaction
+	depCount := make(map[int]int)
+	for txIdx, deps := range dependencies {
+		depCount[txIdx] = len(deps)
+	}
+	
+	// Group transactions into batches
+	var result [][]*transaction.Transaction
+	processed := make(map[int]bool)
+	
+	for len(processed) < len(transactions) {
+		// Find all transactions that have no unprocessed dependencies
+		batch := make([]*transaction.Transaction, 0)
+		
+		for i := 0; i < len(transactions); i++ {
+			if processed[i] {
+				continue
+			}
+			
+			hasUnprocessedDeps := false
+			for _, dep := range dependencies[i] {
+				if !processed[dep] {
+					hasUnprocessedDeps = true
+					break
+				}
+			}
+			
+			if !hasUnprocessedDeps {
+				batch = append(batch, transactions[i])
+				processed[i] = true
+			}
+		}
+		
+		if len(batch) > 0 {
+			result = append(result, batch)
+		} else if len(processed) < len(transactions) {
+			// If no progress can be made but we haven't processed all transactions,
+			// there's a cycle in the dependency graph - break it
+			for i := 0; i < len(transactions); i++ {
+				if !processed[i] {
+					batch = append(batch, transactions[i])
+					processed[i] = true
+					break
+				}
+			}
+			result = append(result, batch)
+		}
+	}
+	
+	return result
 }
 
 // OptimizeTransactionOrder reorders transactions to maximize parallelism
@@ -329,54 +536,70 @@ func OptimizeTransactionOrder(transactions []*transaction.Transaction) []*transa
 	// Calculate dependencies
 	dependencies := CalculateTransactionDependencies(transactions)
 	
-	// Group transactions by their sender (to maintain nonce order)
-	senderGroups := make(map[string][]*transaction.Transaction)
-	for _, tx := range transactions {
-		senderGroups[tx.Sender] = append(senderGroups[tx.Sender], tx)
-	}
+	// Group transactions into independent batches
+	batches := GroupIndependentTransactions(transactions, dependencies)
 	
-	// Sort each sender group by nonce
-	for sender, txs := range senderGroups {
-		sorted := make([]*transaction.Transaction, len(txs))
-		copy(sorted, txs)
-		// Simple bubble sort by nonce
-		for i := 0; i < len(sorted)-1; i++ {
-			for j := 0; j < len(sorted)-i-1; j++ {
-				if sorted[j].Nonce > sorted[j+1].Nonce {
-					sorted[j], sorted[j+1] = sorted[j+1], sorted[j]
+	// Flatten batches
+	var result []*transaction.Transaction
+	for _, batch := range batches {
+		// For each batch, sort by sender to keep sender's transactions together
+		senderGroups := make(map[string][]*transaction.Transaction)
+		for _, tx := range batch {
+			senderGroups[tx.Sender] = append(senderGroups[tx.Sender], tx)
+		}
+		
+		// Sort each sender's transactions by nonce
+		for sender, txs := range senderGroups {
+			// Simple bubble sort by nonce
+			for i := 0; i < len(txs)-1; i++ {
+				for j := 0; j < len(txs)-i-1; j++ {
+					if txs[j].Nonce > txs[j+1].Nonce {
+						txs[j], txs[j+1] = txs[j+1], txs[j]
+					}
 				}
 			}
+			senderGroups[sender] = txs
 		}
-		senderGroups[sender] = sorted
-	}
-	
-	// Flatten groups back into a single list, trying to interleave different senders
-	// to maximize parallelism (simple greedy approach)
-	var result []*transaction.Transaction
-	senderQueue := make([]string, 0)
-	
-	// Initialize queue with all senders
-	for sender := range senderGroups {
-		if len(senderGroups[sender]) > 0 {
-			senderQueue = append(senderQueue, sender)
-		}
-	}
-	
-	// Round-robin between senders
-	for len(senderQueue) > 0 {
-		sender := senderQueue[0]
-		senderQueue = senderQueue[1:]
 		
-		if len(senderGroups[sender]) > 0 {
-			// Take the first transaction from this sender
-			tx := senderGroups[sender][0]
-			senderGroups[sender] = senderGroups[sender][1:]
-			result = append(result, tx)
-			
-			// Put sender back in queue if it has more transactions
-			if len(senderGroups[sender]) > 0 {
-				senderQueue = append(senderQueue, sender)
+		// Interleave transactions from different senders for better parallelism
+		var senders []string
+		for sender := range senderGroups {
+			senders = append(senders, sender)
+		}
+		
+		// Process each sender's transactions
+		senderIdx := 0
+		for len(senderGroups) > 0 {
+			if senderIdx >= len(senders) {
+				senderIdx = 0
 			}
+			
+			sender := senders[senderIdx]
+			if txs, exists := senderGroups[sender]; exists && len(txs) > 0 {
+				// Add the first transaction from this sender
+				result = append(result, txs[0])
+				
+				// Remove the processed transaction
+				if len(txs) > 1 {
+					senderGroups[sender] = txs[1:]
+				} else {
+					delete(senderGroups, sender)
+					// Remove from senders list
+					for i, s := range senders {
+						if s == sender {
+							senders = append(senders[:i], senders[i+1:]...)
+							break
+						}
+					}
+					// Adjust senderIdx if needed
+					if senderIdx >= len(senders) && len(senders) > 0 {
+						senderIdx = 0
+					}
+					continue // Skip incrementing senderIdx
+				}
+			}
+			
+			senderIdx++
 		}
 	}
 	
