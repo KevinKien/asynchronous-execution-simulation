@@ -314,42 +314,92 @@ func (bc *Blockchain) ExecuteBlock(block *block.Block, isSpeculative bool) strin
 	bc.ExecutionMutex.Lock()
 	defer bc.ExecutionMutex.Unlock()
 	
-	// Create a copy of the state to work on
-	stateCopy := bc.State.Copy()
+	fmt.Printf("Executing block %d with %d transactions\n", block.Height, len(block.Transactions))
 	
-	// Execute each transaction
-	for _, tx := range block.Transactions {
-		err := stateCopy.ExecuteTransaction(tx)
-		if err != nil {
-			fmt.Printf("Error executing transaction %s: %v\n", tx.ID, err)
-			continue
+	// Check if parallel execution is enabled in config
+	if bc.Config.ParallelExecutionEnabled {
+		// Create parallel executor with number of workers from config
+		executor := execution.NewParallelExecutor(bc.Config.ParallelWorkers, bc.State)
+		
+		// Optimize transaction order if enabled
+		var txsToExecute []*transaction.Transaction
+		if bc.Config.OptimizeTransactionOrder {
+			txsToExecute = execution.OptimizeTransactionOrder(block.Transactions)
+			fmt.Println("Optimized transaction order for parallel execution")
+		} else {
+			txsToExecute = block.Transactions
 		}
 		
-		fmt.Printf("Executed tx %s: %s -> %s, amount: %d\n", 
-			tx.ID, tx.Sender, tx.Recipient, tx.Amount)
-	}
-	
-	// Get the new state root
-	newStateRoot := stateCopy.StateRoot
-	
-	if isSpeculative {
-		fmt.Printf("Speculatively executed block %d, new state root: %s\n", 
-			block.Height, newStateRoot)
-		bc.SpeculativeStateRoot[block.Height] = newStateRoot
+		// Execute transactions in parallel
+		results, newStateRoot := executor.ExecuteBatch(txsToExecute)
+		
+		// Log execution results
+		successCount := 0
+		for _, result := range results {
+			if result.Success {
+				successCount++
+				fmt.Printf("Successfully executed tx %s in parallel\n", result.Transaction.ID)
+			} else {
+				fmt.Printf("Failed to execute tx %s: %v\n", result.Transaction.ID, result.Error)
+			}
+		}
+		fmt.Printf("Parallel execution completed: %d/%d transactions succeeded\n", 
+			successCount, len(block.Transactions))
+		
+		if isSpeculative {
+			fmt.Printf("Speculatively executed block %d, new state root: %s\n", 
+				block.Height, newStateRoot)
+			bc.SpeculativeStateRoot[block.Height] = newStateRoot
+		} else {
+			// Update execution state
+			bc.LastExecutedHeight = block.Height
+			bc.PendingStateRoots[block.Height] = newStateRoot
+			
+			block.StateRoot = newStateRoot
+			fmt.Printf("Executed block %d, new state root: %s\n", 
+				block.Height, newStateRoot)
+		}
+		
+		return newStateRoot
 	} else {
-		// Update the actual state
-		bc.State = stateCopy
+		// Sequential execution (original implementation)
+		// Create a copy of the state to work on
+		stateCopy := bc.State.Copy()
 		
-		// Update execution state
-		bc.LastExecutedHeight = block.Height
-		bc.PendingStateRoots[block.Height] = newStateRoot
+		// Execute each transaction
+		for _, tx := range block.Transactions {
+			err := stateCopy.ExecuteTransaction(tx)
+			if err != nil {
+				fmt.Printf("Error executing transaction %s: %v\n", tx.ID, err)
+				continue
+			}
+			
+			fmt.Printf("Executed tx %s: %s -> %s, amount: %d\n", 
+				tx.ID, tx.Sender, tx.Recipient, tx.Amount)
+		}
 		
-		block.StateRoot = newStateRoot
-		fmt.Printf("Executed block %d, new state root: %s\n", 
-			block.Height, newStateRoot)
+		// Get the new state root
+		newStateRoot := stateCopy.StateRoot
+		
+		if isSpeculative {
+			fmt.Printf("Speculatively executed block %d, new state root: %s\n", 
+				block.Height, newStateRoot)
+			bc.SpeculativeStateRoot[block.Height] = newStateRoot
+		} else {
+			// Update the actual state
+			bc.State = stateCopy
+			
+			// Update execution state
+			bc.LastExecutedHeight = block.Height
+			bc.PendingStateRoots[block.Height] = newStateRoot
+			
+			block.StateRoot = newStateRoot
+			fmt.Printf("Executed block %d, new state root: %s\n", 
+				block.Height, newStateRoot)
+		}
+		
+		return newStateRoot
 	}
-	
-	return newStateRoot
 }
 
 // VerifyBlock marks a block as verified after execution
