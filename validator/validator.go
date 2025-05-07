@@ -9,7 +9,7 @@ import (
 	"encoding/hex"
 	"fmt"
 
-	"github.com/KevinKien/asynchronous-execution-simulation/transaction"
+	"asynchronous-execution-simulation/transaction"
 )
 
 // Validator represents a node with validation privileges
