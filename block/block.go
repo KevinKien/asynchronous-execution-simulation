@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/KevinKien/asynchronous-execution-simulation/transaction"
+	"asynchronous-execution-simulation/transaction"
 )
 
 // BlockStatus represents the different stages a block can be in
